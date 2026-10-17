@@ -1,0 +1,80 @@
+#!/bin/sh
+# /etc/init.d/zerotier - ZeroTier One for WD My Book World Edition II (fw 01.02.14)
+# Hooked into boot via /etc/init.d/S99zerotier -> zerotier (rcS runs "S??* start", rcH runs "S??* stop").
+# Added 2026-10-17.
+
+ZT_DIR=/DataVolume/zerotier
+ZT_BIN=$ZT_DIR/zerotier-one
+ZT_HOME=$ZT_DIR/var
+TUN_KO=/lib/modules/2.6.24.4/kernel/drivers/net/tun.ko
+PIDFILE=$ZT_HOME/zerotier-one.pid
+WAIT_MAX=60
+
+log() { echo "zerotier: $*"; logger -t zerotier "$*" 2>/dev/null; }
+
+is_running() {
+	[ -f "$PIDFILE" ] || return 1
+	P=`cat "$PIDFILE" 2>/dev/null`
+	[ -n "$P" ] && [ -d "/proc/$P" ] && grep -q zerotier "/proc/$P/cmdline" 2>/dev/null
+}
+
+prep_tun() {
+	if ! grep -q ' tun$' /proc/misc; then
+		/sbin/insmod $TUN_KO || { log "insmod $TUN_KO failed"; return 1; }
+	fi
+	if [ ! -c /dev/net/tun ]; then
+		mkdir -p /dev/net
+		mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
+	fi
+	return 0
+}
+
+wait_datavolume() {
+	i=0
+	while ! grep -q ' /DataVolume ' /proc/mounts; do
+		[ $i -ge $WAIT_MAX ] && return 1
+		sleep 1; i=`expr $i + 1`
+	done
+	return 0
+}
+
+do_start() {
+	if is_running; then log "already running (pid `cat $PIDFILE`)"; return 0; fi
+	prep_tun || return 1
+	if ! wait_datavolume; then log "/DataVolume not mounted after ${WAIT_MAX}s, not starting"; return 1; fi
+	if [ ! -x "$ZT_BIN" ]; then log "$ZT_BIN missing"; return 1; fi
+	rm -f "$PIDFILE"
+	"$ZT_BIN" -d "$ZT_HOME" >/dev/null 2>&1 </dev/null
+	sleep 2
+	if is_running; then log "started (pid `cat $PIDFILE`)"; else log "failed to start"; return 1; fi
+}
+
+do_stop() {
+	if ! is_running; then log "not running"; rm -f "$PIDFILE"; return 0; fi
+	P=`cat "$PIDFILE"`
+	kill $P
+	i=0
+	while [ -d /proc/$P ] && [ $i -lt 15 ]; do sleep 1; i=`expr $i + 1`; done
+	if [ -d /proc/$P ]; then kill -9 $P; sleep 1; fi
+	rm -f "$PIDFILE"
+	log "stopped"
+}
+
+case "$1" in
+	start)
+		if grep -q ' /DataVolume ' /proc/mounts; then
+			do_start
+		else
+			# Don't block boot: wait for /DataVolume in the background
+			log "/DataVolume not mounted yet, waiting in background (max ${WAIT_MAX}s)"
+			( do_start ) >/dev/null 2>&1 </dev/null &
+		fi
+		;;
+	stop)    do_stop ;;
+	restart) do_stop; do_start ;;
+	status)
+		if is_running; then echo "zerotier running (pid `cat $PIDFILE`)"; "$ZT_DIR/zerotier-cli" -D"$ZT_HOME" info; else echo "zerotier not running"; exit 1; fi
+		;;
+	*) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
+exit $?

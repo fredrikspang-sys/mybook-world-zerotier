@@ -1,0 +1,17 @@
+# build work dirs / downloads
+work/
+*.tar.gz
+*.tar.xz
+*.tgz
+# never commit ZeroTier identities or state
+identity.secret
+identity.public
+authtoken.secret
+var/
+*.secret
+# misc
+*.bak-*
+*.orig
+*.rej
+*~
+.DS_Store

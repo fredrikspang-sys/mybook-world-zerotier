@@ -1,0 +1,10 @@
+--- a/osdep/LinuxEthernetTap.cpp
++++ b/osdep/LinuxEthernetTap.cpp
+@@ -260,6 +260,7 @@
+ 		}
+ 	
+ 
++		ioctl(sock,SIOCGIFFLAGS,(void *)&ifr); // re-read flags: ifr_flags shares a union with ifr_hwaddr/ifr_mtu written above
+ 		ifr.ifr_flags |= IFF_MULTICAST;
+ 		ifr.ifr_flags |= IFF_UP;
+ 		if (ioctl(sock,SIOCSIFFLAGS,(void *)&ifr) < 0) {

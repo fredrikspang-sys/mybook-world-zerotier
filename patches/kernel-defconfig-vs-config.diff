@@ -1,0 +1,20 @@
+--- a/arch/arm/configs/oxnas_810_eabi_wd_prod_defconfig
++++ b/.config
+@@ -1,7 +1,7 @@
+ #
+ # Automatically generated make config: don't edit
+ # Linux kernel version: 2.6.24.4
+-# Fri Sep 26 10:09:17 2008
++# Sat Oct 17 20:01:59 2026
+ #
+ CONFIG_ARM=y
+ CONFIG_SYS_SUPPORTS_APM_EMULATION=y
+@@ -507,7 +507,7 @@
+ # CONFIG_BONDING is not set
+ # CONFIG_MACVLAN is not set
+ # CONFIG_EQUALIZER is not set
+-# CONFIG_TUN is not set
++CONFIG_TUN=m
+ # CONFIG_VETH is not set
+ # CONFIG_NET_ETHERNET is not set
+ CONFIG_MII=m
