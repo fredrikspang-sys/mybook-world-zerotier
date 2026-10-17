@@ -158,6 +158,12 @@ With an unpatched binary, the workaround is `ifconfig <zt-device> arp` after eve
 - **Firmware specific.** `tun.ko` only fits firmware 01.02.14 / kernel `2.6.24.4 mod_unload ARMv5`.
 - **No automatic updates.** Rebuild with a newer tag at your own risk.
 
+## See also
+
+- [mybook-world-openssh](https://github.com/fredrikspang-sys/mybook-world-openssh): a static OpenSSH 10.6p1
+  for the same NAS. It replaces the stock OpenSSH 3.9p1, so you no longer need the legacy client options,
+  and the web GUI SSH toggle keeps working.
+
 ## Licenses
 
 See [LICENSES.md](LICENSES.md). In short:
