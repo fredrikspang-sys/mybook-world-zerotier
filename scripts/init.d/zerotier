@@ -1,21 +1,56 @@
 #!/bin/sh
 # /etc/init.d/zerotier - ZeroTier One for WD My Book World Edition II (fw 01.02.14)
 # Hooked into boot via /etc/init.d/S99zerotier -> zerotier (rcS runs "S??* start", rcH runs "S??* stop").
-# Added 2026-10-17.
+#
+# Where the state lives (ZT_RAM_HOME):
+#   ZeroTier rewrites networks.d/<nwid>.conf about every 60 s (on each network config
+#   refresh). With its home on the data disk, that write alone keeps the disks from ever
+#   spinning down. So by default ("auto") the live home is /mnt/ram/zerotier (tmpfs, mounted
+#   by S01auto_mountd before S99zerotier runs), seeded at every start from the persistent
+#   copy in $ZT_SEED on the data disk. If /mnt/ram is not mounted, the disk home is used.
+#     auto - RAM home if /mnt/ram is mounted, else the disk home (default)
+#     yes  - RAM home only; refuse to start without /mnt/ram
+#     no   - always use the disk home (the old behaviour)
+#   After joining or leaving a network run "$0 save" ("stop" also saves when it can).
+#   The identity is only ever copied between this NAS's disk and its RAM; "save" never
+#   overwrites an identity that already exists in the seed.
 
+ZT_RAM_HOME=auto
 ZT_DIR=/DataVolume/zerotier
 ZT_BIN=$ZT_DIR/zerotier-one
-ZT_HOME=$ZT_DIR/var
+ZT_CLI=$ZT_DIR/zerotier-cli
+ZT_SEED=$ZT_DIR/var
+RAM_BASE=/mnt/ram
+RAM_HOME=$RAM_BASE/zerotier
 TUN_KO=/lib/modules/2.6.24.4/kernel/drivers/net/tun.ko
-PIDFILE=$ZT_HOME/zerotier-one.pid
 WAIT_MAX=60
 
 log() { echo "zerotier: $*"; logger -t zerotier "$*" 2>/dev/null; }
 
-is_running() {
-	[ -f "$PIDFILE" ] || return 1
-	P=`cat "$PIDFILE" 2>/dev/null`
+ram_ok() { grep -q " $RAM_BASE " /proc/mounts; }
+
+# ZT_HOME = where a new daemon should run
+pick_home() {
+	case "$ZT_RAM_HOME" in
+		no)  ZT_HOME=$ZT_SEED ;;
+		yes) ZT_HOME=$RAM_HOME ;;
+		*)   if ram_ok; then ZT_HOME=$RAM_HOME; else ZT_HOME=$ZT_SEED; fi ;;
+	esac
+}
+
+pid_ok() {
+	[ -f "$1" ] || return 1
+	P=`cat "$1" 2>/dev/null`
 	[ -n "$P" ] && [ -d "/proc/$P" ] && grep -q zerotier "/proc/$P/cmdline" 2>/dev/null
+}
+
+# RUN_HOME = home of the running daemon (RAM or disk), P = its pid
+is_running() {
+	for RUN_HOME in $RAM_HOME $ZT_SEED; do
+		pid_ok "$RUN_HOME/zerotier-one.pid" && return 0
+	done
+	RUN_HOME=
+	return 1
 }
 
 prep_tun() {
@@ -38,25 +73,85 @@ wait_datavolume() {
 	return 0
 }
 
+# Seed the RAM home from the disk copy (only if the RAM home has no identity yet)
+prep_home() {
+	mkdir -p "$ZT_SEED" && chmod 700 "$ZT_SEED"
+	[ "$ZT_HOME" = "$ZT_SEED" ] && return 0
+	ram_ok || { log "$RAM_BASE is not mounted"; return 1; }
+	[ -f "$ZT_HOME/identity.secret" ] && return 0
+	mkdir -p "$ZT_HOME" && chmod 700 "$ZT_HOME" || return 1
+	for f in identity.public identity.secret authtoken.secret planet; do
+		[ -f "$ZT_SEED/$f" ] && { cp -p "$ZT_SEED/$f" "$ZT_HOME/" || return 1; }
+	done
+	for d in networks.d moons.d peers.d; do
+		[ -d "$ZT_SEED/$d" ] && [ ! -d "$ZT_HOME/$d" ] && { cp -pR "$ZT_SEED/$d" "$ZT_HOME/" || return 1; }
+	done
+	return 0
+}
+
+# Copy what must survive a reboot from the RAM home back to the disk seed:
+# the identity (only if the seed has none), network memberships, moons, planet.
+do_save() {
+	H=$1
+	[ -n "$H" ] || { pick_home; H=$ZT_HOME; }
+	if [ "$H" = "$ZT_SEED" ]; then echo "zerotier: home is on disk ($H), nothing to save"; return 0; fi
+	[ -d "$H" ] || { log "save: $H does not exist"; return 1; }
+	grep -q ' /DataVolume ' /proc/mounts || { log "save: /DataVolume not mounted"; return 1; }
+	mkdir -p "$ZT_SEED/networks.d" && chmod 700 "$ZT_SEED" "$ZT_SEED/networks.d" || return 1
+	for f in identity.public identity.secret authtoken.secret; do
+		[ -f "$H/$f" ] || continue
+		if [ ! -f "$ZT_SEED/$f" ]; then
+			cp -p "$H/$f" "$ZT_SEED/$f" && log "save: stored $f in $ZT_SEED"
+		elif [ "`cat "$H/$f"`" != "`cat "$ZT_SEED/$f"`" ]; then
+			log "save: WARNING $f in $H differs from $ZT_SEED; seed left untouched"
+		fi
+	done
+	[ -f "$H/planet" ] && [ ! -f "$ZT_SEED/planet" ] && cp -p "$H/planet" "$ZT_SEED/"
+	n=0
+	for f in "$H"/networks.d/*.conf; do
+		[ -f "$f" ] || continue
+		cp -p "$f" "$ZT_SEED/networks.d/" && n=`expr $n + 1`
+	done
+	if [ -d "$H/moons.d" ]; then
+		mkdir -p "$ZT_SEED/moons.d"
+		for f in "$H"/moons.d/*; do [ -f "$f" ] && cp -p "$f" "$ZT_SEED/moons.d/"; done
+	fi
+	# A network you left is not removed from the seed automatically (safety); delete
+	# $ZT_SEED/networks.d/<nwid>.conf and <nwid>.local.conf yourself.
+	sync
+	log "save: $n networks.d file(s) copied to $ZT_SEED"
+	return 0
+}
+
 do_start() {
-	if is_running; then log "already running (pid `cat $PIDFILE`)"; return 0; fi
+	if is_running; then log "already running (pid $P, home $RUN_HOME)"; return 0; fi
 	prep_tun || return 1
 	if ! wait_datavolume; then log "/DataVolume not mounted after ${WAIT_MAX}s, not starting"; return 1; fi
 	if [ ! -x "$ZT_BIN" ]; then log "$ZT_BIN missing"; return 1; fi
-	rm -f "$PIDFILE"
+	pick_home
+	prep_home || return 1
+	rm -f "$ZT_HOME/zerotier-one.pid"
 	"$ZT_BIN" -d "$ZT_HOME" >/dev/null 2>&1 </dev/null
 	sleep 2
-	if is_running; then log "started (pid `cat $PIDFILE`)"; else log "failed to start"; return 1; fi
+	if ! is_running; then log "failed to start (home $ZT_HOME)"; return 1; fi
+	log "started (pid $P, home $RUN_HOME)"
+	# First run in RAM: a new identity was just generated there; keep it on disk too.
+	if [ "$RUN_HOME" = "$RAM_HOME" ] && [ ! -f "$ZT_SEED/identity.secret" ]; then
+		i=0
+		while [ ! -f "$RAM_HOME/identity.secret" ] && [ $i -lt 30 ]; do sleep 1; i=`expr $i + 1`; done
+		do_save "$RAM_HOME"
+	fi
+	return 0
 }
 
 do_stop() {
-	if ! is_running; then log "not running"; rm -f "$PIDFILE"; return 0; fi
-	P=`cat "$PIDFILE"`
+	if ! is_running; then log "not running"; return 0; fi
+	if [ "$RUN_HOME" = "$RAM_HOME" ]; then do_save "$RAM_HOME" || log "save before stop failed"; fi
 	kill $P
 	i=0
 	while [ -d /proc/$P ] && [ $i -lt 15 ]; do sleep 1; i=`expr $i + 1`; done
 	if [ -d /proc/$P ]; then kill -9 $P; sleep 1; fi
-	rm -f "$PIDFILE"
+	rm -f "$RUN_HOME/zerotier-one.pid"
 	log "stopped"
 }
 
@@ -72,9 +167,22 @@ case "$1" in
 		;;
 	stop)    do_stop ;;
 	restart) do_stop; do_start ;;
-	status)
-		if is_running; then echo "zerotier running (pid `cat $PIDFILE`)"; "$ZT_DIR/zerotier-cli" -D"$ZT_HOME" info; else echo "zerotier not running"; exit 1; fi
+	save)
+		if is_running; then do_save "$RUN_HOME"; else do_save; fi
 		;;
-	*) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+	cli)
+		shift
+		if is_running; then H=$RUN_HOME; else pick_home; H=$ZT_HOME; fi
+		"$ZT_CLI" -D"$H" "$@"
+		;;
+	status)
+		if is_running; then
+			echo "zerotier running (pid $P, home $RUN_HOME, seed $ZT_SEED)"
+			"$ZT_CLI" -D"$RUN_HOME" info
+		else
+			echo "zerotier not running"; exit 1
+		fi
+		;;
+	*) echo "Usage: $0 {start|stop|restart|status|save|cli <zerotier-cli args>}"; exit 1 ;;
 esac
 exit $?

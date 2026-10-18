@@ -10,7 +10,7 @@ is far too old for any official ZeroTier build. This repo provides:
 |------|------|
 | `bin/tun.ko` | Universal TUN/TAP driver built from WD's own GPL kernel source, vermagic `2.6.24.4 mod_unload ARMv5` |
 | `bin/zerotier-one` | ZeroTier One 1.10.6, fully static (musl), ARMv5TE soft-float EABI, with a NOARP fix for old kernels |
-| `scripts/init.d/zerotier` | Boot script (start/stop/restart/status) for the WD firmware's `/etc/init.d/S??*` mechanism |
+| `scripts/init.d/zerotier` | Boot script (start/stop/restart/status/save/cli) for the WD firmware's `/etc/init.d/S??*` mechanism; keeps ZeroTier's state in RAM so the disks can spin down |
 | `scripts/install.sh` | Installer that runs on the NAS |
 | `scripts/build_tun.sh`, `scripts/build_zt.sh` | Rebuild both binaries from source on an x86_64 Linux host |
 | `patches/` | All source changes (kernel Makefile, ZeroTier makefile, NOARP fix) plus the exact kernel `.config` |
@@ -53,11 +53,14 @@ It backs up any file it replaces (`*.bak-<timestamp>`), then starts the daemon.
 Then join your network and authorize the node in ZeroTier Central:
 
 ```sh
-cd /DataVolume/zerotier
-./zerotier-cli -D/DataVolume/zerotier/var join <NETWORK_ID>
-./zerotier-cli -D/DataVolume/zerotier/var info          # shows your node ID
-./zerotier-cli -D/DataVolume/zerotier/var listnetworks  # status becomes OK after authorization
+/etc/init.d/zerotier cli join <NETWORK_ID>
+/etc/init.d/zerotier save                 # keep the membership across reboots (see below)
+/etc/init.d/zerotier cli info             # shows your node ID
+/etc/init.d/zerotier cli listnetworks     # status becomes OK after authorization
 ```
+
+`/etc/init.d/zerotier cli ...` runs `zerotier-cli` against the home directory the daemon is actually
+using (RAM or disk), so you don't need to know which one it is.
 
 ### Manual install
 
@@ -85,6 +88,44 @@ The root filesystem (ext3 on `/dev/md0`) is persistent.
 - starts the daemon.
 
 It logs to syslog with the tag `zerotier`. To disable it: `rm /etc/init.d/S99zerotier`.
+
+### State in RAM (lets the disks spin down)
+
+The NAS spins its disks down only after 10 minutes without any disk I/O (the firmware's
+`/usr/bin/monitorio.sh` watches `/proc/diskstats` and then runs `hdparm -y`). ZeroTier
+rewrites `networks.d/<NETWORK_ID>.conf` in its home directory about **every 60 seconds**
+(each time it refreshes the network config from the controller), plus `peers.d/` now and then.
+With the home on `/DataVolume`, those small writes alone keep the disks spinning forever.
+`/`, `/var` and `/DataVolume` are all RAID partitions on the same disks, so there's no
+"other" disk to move them to.
+
+The init script therefore runs the daemon with its home in **`/mnt/ram/zerotier`**. That's the
+firmware's own tmpfs (`/dev/ram0`, mounted by `S01auto_mountd`, which `rcS` runs long before `S99zerotier`).
+
+- **`/DataVolume/zerotier/var` is the persistent seed.** On every start, if the RAM home has no
+  identity yet (e.g. after a reboot), the script copies `identity.*`, `authtoken.secret`, `planet`,
+  `networks.d/`, `moons.d/` and `peers.d/` from the seed into RAM. The node ID and the assigned
+  IPs therefore stay the same across reboots.
+- **The identity never leaves the NAS.** It's only copied between the NAS's own disk and RAM.
+  On the very first start (empty seed), the identity ZeroTier generates in RAM is saved to the seed
+  right away. `save` never overwrites an identity that already exists in the seed. If the two
+  differ, it only prints a warning.
+- **After joining (or leaving) a network, run `/etc/init.d/zerotier save`.** It copies `networks.d/*.conf`
+  (and moons) from RAM back to the seed. `stop` and `restart` also save, but at shutdown the firmware
+  may unmount `/DataVolume` before `S99zerotier stop` runs, so don't rely on that. Leaving a network
+  is never mirrored automatically, as a safety measure. After `cli leave <NETWORK_ID>`, delete
+  `/DataVolume/zerotier/var/networks.d/<NETWORK_ID>.conf` and `<NETWORK_ID>.local.conf` yourself.
+- **Fallback:** if `/mnt/ram` isn't mounted, the daemon runs directly from the disk home, as before.
+  Set `ZT_RAM_HOME=` at the top of the script to `auto` (default), `yes` (RAM only; refuse to start
+  without `/mnt/ram`) or `no` (always the disk home).
+- The RAM home uses well under 100 KB of the ~62 MB tmpfs.
+
+Other things that can keep these NASes awake: the firmware's `syslogd` and `mini_httpd` log to
+`/var/log`, which is a symlink to `/tmp` on the root RAID (`md0`), **not** tmpfs. One LAN device
+probing the web UI every few minutes is enough to keep the disks spinning. Pointing those logs
+to `/mnt/ram` too (`syslogd -O /mnt/ram/messages`, `mini_httpd -l /mnt/ram/mini_httpd.log`) fixes that.
+`mini_httpd` is started by `rcS` before `/mnt/ram` is mounted, so it needs a guard or a restart later in boot.
+You can check what is still writing with `echo 1 > /proc/sys/vm/block_dump; sleep 300; dmesg; echo 0 > /proc/sys/vm/block_dump`.
 
 ## Build it yourself
 

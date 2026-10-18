@@ -44,5 +44,6 @@ sync
 sleep 5
 /etc/init.d/zerotier status || true
 echo
-echo "Next: $ZT_DIR/zerotier-cli -D$ZT_DIR/var join <NETWORK_ID>"
-echo "then authorize the node in ZeroTier Central (or your controller)."
+echo "Next: /etc/init.d/zerotier cli join <NETWORK_ID>"
+echo "then authorize the node in ZeroTier Central (or your controller),"
+echo "and run /etc/init.d/zerotier save so the membership survives a reboot (state lives in /mnt/ram)."
