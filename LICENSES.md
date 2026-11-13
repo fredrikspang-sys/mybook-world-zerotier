@@ -24,25 +24,24 @@ Complete corresponding source (GPL-2.0 §3):
 
 If the mirror ever disappears, a copy of the source can be requested through this repo's issue tracker.
 
-## bin/zerotier-one: ZeroTier One 1.10.6 (BSL 1.1 / Apache-2.0 after Change Date)
+## bin/zerotier-one: ZeroTier One 1.16.2 (MPL-2.0)
 
-- **Source:** https://github.com/zerotier/ZeroTierOne, tag `1.10.6`, unmodified except for
-  `patches/zt-1.10.6-make-linux-armv5te-softfloat.patch` and `patches/zt-1.10.6-noarp-fix.patch`.
-- **License:** the 1.10.6 source tree's `LICENSE.txt` is reproduced verbatim in `licenses/ZeroTier-LICENSE.txt`.
-  It is the Business Source License 1.1 with ZeroTier's Additional Use Grant.
-  - The BSL grants the right to "copy, modify, create derivative works, redistribute, and make non-production use".
-  - The Additional Use Grant allows production use, except for (1) operating or selling ZeroTier roots, controllers
-    or key generation as a for-profit service, (2) closed-source commercial derivative products, (3) commercial
-    rebranding, and (4) certain government uses.
-  - That file names **Change Date: 2025-01-01** and **Change License: Apache-2.0**. The BSL converts on the Change
-    Date or on the 4th anniversary of the version's first public release, whichever comes first.
-  - The license header still names "Licensed Work: ... 1.4.4", a stale header in upstream's file. It is the license
-    file shipped with the 1.10.6 tag.
-- **Our reading:** personal and non-commercial use and redistribution of this binary (with the license text and
-  source pointers, as here) is permitted. Under the stated Change Date, 1.10.6 should now also be available under
-  Apache-2.0. This is not legal advice; check the license text yourself for commercial use.
+- **Source:** https://github.com/zerotier/ZeroTierOne, tag `1.16.2`, unmodified except for
+  `patches/zt-1.16.2-make-linux-armv5te-softfloat.patch`,
+  `patches/zt-1.16.2-noarp-fix.patch`,
+  `patches/zt-1.16.2-disable-recvmmsg.patch` and
+  `patches/zt-1.16.2-httplib-so-reuseaddr.patch`.
+- **License:** the 1.16.2 source tree's `LICENSE.txt` points at `LICENSE-MPL.txt` for `node/`, `osdep/`,
+  `service/` and everywhere else except `ext/` and `nonfree/`. That MPL-2.0 text is reproduced verbatim in
+  `licenses/ZeroTier-LICENSE-MPL.txt`. This build does not include the non-free controller
+  (`ZT_NONFREE` is not set) and is built with `ZT_SSO_SUPPORTED=0`.
+- **Our reading:** redistribution of this binary with the license text and source pointers, as here, is
+  permitted under MPL-2.0. This is not legal advice; check the license text yourself for your use.
 - **"ZeroTier" trademark:** belongs to ZeroTier, Inc. This is an unofficial community build, not affiliated with
   or endorsed by ZeroTier, Inc.
+
+The previous prebuilt binary (ZeroTier One 1.10.6, [v1.2.0](https://github.com/fredrikspang-sys/mybook-world-zerotier/releases/tag/v1.2.0))
+was under the Business Source License 1.1. That license text remains in `licenses/ZeroTier-LICENSE.txt`.
 
 Third-party code statically linked into `zerotier-one` (license files in `licenses/`):
 
@@ -52,5 +51,8 @@ Third-party code statically linked into `zerotier-one` (license files in `licens
 | libnatpmp (bundled) | BSD-3-Clause |
 | http-parser (bundled) | MIT |
 | nlohmann/json (bundled, header-only) | MIT |
+| cpp-httplib (bundled, header-only) | MIT |
+| inja (bundled, header-only) | MIT |
+| prometheus-cpp-lite (bundled, header-only) | MIT |
 | musl libc (toolchain) | MIT |
-| libstdc++ / libgcc (GCC 11.2.1, toolchain) | GPL-3.0 with the GCC Runtime Library Exception, which permits static linking into non-GPL programs |
+| libstdc++ / libgcc / libatomic (GCC 11.2.1, toolchain) | GPL-3.0 with the GCC Runtime Library Exception, which permits static linking into non-GPL programs |

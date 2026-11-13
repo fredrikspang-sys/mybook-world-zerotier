@@ -1,0 +1,11 @@
+--- a/osdep/Phy.hpp
++++ b/osdep/Phy.hpp
+@@ -1032,7 +1032,7 @@
+ 
+ 				case ZT_PHY_SOCKET_UDP:
+ 					if (FD_ISSET(s->sock, &rfds)) {
+-#if (defined(__linux__) || defined(linux) || defined(__linux)) && defined(MSG_WAITFORONE)
++#if (defined(__linux__) || defined(linux) || defined(__linux)) && defined(MSG_WAITFORONE) && !defined(ZT_DISABLE_RECVMMSG)
+ #define RECVMMSG_WINDOW_SIZE 128
+ #define RECVMMSG_BUF_SIZE	 1500
+ 						iovec iovs[RECVMMSG_WINDOW_SIZE];

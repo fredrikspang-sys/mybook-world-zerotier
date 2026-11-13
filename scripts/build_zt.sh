@@ -1,10 +1,13 @@
 #!/bin/bash
-# Build a fully static ZeroTier One 1.10.6 for ARMv5TE soft-float EABI (musl),
+# Build a fully static ZeroTier One 1.16.2 for ARMv5TE soft-float EABI (musl),
 # for old kernels such as the WD My Book World Edition II (Linux 2.6.24.4, glibc 2.3.4).
 #
 # Usage: scripts/build_zt.sh             (run from the repo root, on an x86_64 Linux host)
 #   WORKDIR=/some/dir scripts/build_zt.sh
 # Output: $WORKDIR/zerotier-one (stripped)
+#
+# The previous 1.10.6 builder is scripts/build_zt_1.10.6.sh; a prebuilt 1.10.6
+# binary is in the v1.2.0 release.
 set -euo pipefail
 unset CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
 
@@ -12,7 +15,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORKDIR="${WORKDIR:-$REPO/work}"
 JOBS="${JOBS:-$(nproc)}"
 
-ZT_VERSION="1.10.6"
+ZT_VERSION="1.16.2"
 ZT_URL="https://github.com/zerotier/ZeroTierOne/archive/refs/tags/${ZT_VERSION}.tar.gz"
 ZT_DIR="$WORKDIR/ZeroTierOne-${ZT_VERSION}"
 
@@ -35,7 +38,12 @@ echo "### downloading ZeroTierOne $ZT_VERSION"
 
 cd "$ZT_DIR"
 echo "### applying patches"
-for p in zt-1.10.6-make-linux-armv5te-softfloat.patch zt-1.10.6-noarp-fix.patch; do
+for p in \
+	zt-1.16.2-make-linux-armv5te-softfloat.patch \
+	zt-1.16.2-noarp-fix.patch \
+	zt-1.16.2-disable-recvmmsg.patch \
+	zt-1.16.2-httplib-so-reuseaddr.patch
+do
 	if patch -p1 -R --dry-run -s < "$REPO/patches/$p" >/dev/null 2>&1; then
 		echo "    $p already applied"
 	else
@@ -43,11 +51,15 @@ for p in zt-1.10.6-make-linux-armv5te-softfloat.patch zt-1.10.6-noarp-fix.patch;
 	fi
 done
 
-echo "### building (static, non-PIE, no SSO/Rust)"
+echo "### building (static, non-PIE, no SSO/Rust, no recvmmsg, libatomic)"
 make -f make-linux.mk clean >/dev/null
 make -f make-linux.mk -j"$JOBS" one \
-	CC=$T-gcc CXX=$T-g++ CC_MACH=arm ZT_SSO_SUPPORTED=0 ZT_STATIC=1 \
-	CFLAGS="-O2 -fstack-protector" CXXFLAGS="-O2 -fstack-protector" LDFLAGS="-static -no-pie"
+	CC=$T-gcc CXX=$T-g++ CC_MACH=arm \
+	ZT_SSO_SUPPORTED=0 ZT_STATIC=1 ZT_OTEL=0 \
+	CFLAGS="-O2 -fstack-protector" \
+	CXXFLAGS="-O2 -fstack-protector -DZT_DISABLE_RECVMMSG" \
+	LDFLAGS="-static -no-pie" \
+	LDLIBS="-latomic"
 $T-strip -o "$WORKDIR/zerotier-one" zerotier-one
 
 echo "### result"
@@ -55,7 +67,9 @@ ls -l "$WORKDIR/zerotier-one"
 file "$WORKDIR/zerotier-one"
 $T-readelf -A "$WORKDIR/zerotier-one" | grep -E 'Tag_CPU_arch:' || true
 $T-readelf -l "$WORKDIR/zerotier-one" | grep -qi interp && echo "WARNING: not static" || echo "    static, no PT_INTERP"
-# 64-bit atomics would need kuser cmpxchg64 (kernel >= 3.1); make sure none are used
+# 64-bit kernel helpers would need kuser cmpxchg64 (kernel >= 3.1).
+# 1.16.2 uses 64-bit atomics in metrics; they must come from libatomic
+# userspace locks, not from those helpers. Check the unstripped binary.
 if $T-nm zerotier-one | grep -qE '__kernel_cmpxchg64|__check_for_sync8_kernelhelper'; then
 	echo "WARNING: binary uses 64-bit kernel atomic helpers (not available on 2.6.24)"
 fi

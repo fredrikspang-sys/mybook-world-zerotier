@@ -9,11 +9,11 @@ is far too old for any official ZeroTier build. This repo provides:
 | File | What |
 |------|------|
 | `bin/tun.ko` | Universal TUN/TAP driver built from WD's own GPL kernel source, vermagic `2.6.24.4 mod_unload ARMv5` |
-| `bin/zerotier-one` | ZeroTier One 1.10.6, fully static (musl), ARMv5TE soft-float EABI, with a NOARP fix for old kernels |
+| `bin/zerotier-one` | ZeroTier One 1.16.2, fully static (musl), ARMv5TE soft-float EABI, with the old-kernel patches described below |
 | `scripts/init.d/zerotier` | Boot script (start/stop/restart/status/save/cli) for the WD firmware's `/etc/init.d/S??*` mechanism; binary and seed in `/usr/local/zerotier` (root fs), live state in RAM so the disks can spin down |
 | `scripts/install.sh` | Installer that runs on the NAS |
-| `scripts/build_tun.sh`, `scripts/build_zt.sh` | Rebuild both binaries from source on an x86_64 Linux host |
-| `patches/` | All source changes (kernel Makefile, ZeroTier makefile, NOARP fix) plus the exact kernel `.config` |
+| `scripts/build_tun.sh`, `scripts/build_zt.sh` | Rebuild both binaries from source on an x86_64 Linux host (`build_zt.sh` builds 1.16.2; `build_zt_1.10.6.sh` remains for the previous version) |
+| `patches/` | All source changes (kernel Makefile, ZeroTier makefile, NOARP / recvmmsg / SO_REUSEADDR fixes) plus the exact kernel `.config` |
 
 ## Tested on
 
@@ -155,16 +155,30 @@ scripts/build_zt.sh     # -> work/zerotier-one
 
 ### zerotier-one
 
-- **Source:** [ZeroTierOne tag `1.10.6`](https://github.com/zerotier/ZeroTierOne/tree/1.10.6).
+- **Source:** [ZeroTierOne tag `1.16.2`](https://github.com/zerotier/ZeroTierOne/tree/1.16.2).
 - **Toolchain:** musl.cc `armv5l-linux-musleabi-cross` (GCC 11.2.1, musl). Linked fully static and **non-PIE**.
-- **Build options:** `ZT_SSO_SUPPORTED=0` (no Rust/OIDC), `CC_MACH=arm`.
-- **Kernel compatibility:** musl falls back to older syscalls where it needs to. ZeroTier itself uses no syscalls
-  newer than 2.6.24, and it reads `/dev/urandom` instead of calling `getrandom`. The binary uses only 32-bit atomics
-  (kernel helpers present since 2.6.12), not the 64-bit `kuser_cmpxchg64`, which needs kernel 3.1.
-- **`patches/zt-1.10.6-make-linux-armv5te-softfloat.patch`:** `make-linux.mk` only picks soft-float flags when `dpkg`
-  reports `armel`; otherwise it forces hard-float armv6. The patch always uses
-  `-march=armv5te -mtune=arm926ej-s -mfloat-abi=soft -marm -mno-unaligned-access`.
-- **`patches/zt-1.10.6-noarp-fix.patch`:** see below.
+- **Build options:** `ZT_SSO_SUPPORTED=0` (no Rust/OIDC), `ZT_STATIC=1`, `ZT_OTEL=0`, `CC_MACH=arm`,
+  `LDLIBS=-latomic`. Upstream compiles as C++17. `CXXFLAGS` also pass `-DZT_DISABLE_RECVMMSG`.
+- **Kernel compatibility:** musl falls back to older syscalls where it needs to. This build disables `recvmmsg`
+  (see below). It still reads `/dev/urandom` instead of calling `getrandom`. 1.16.2 uses 64-bit atomics in the
+  Prometheus metrics code; they are provided by libatomic's userspace locks (`-latomic`), not by the 64-bit
+  `kuser_cmpxchg64` helper, which needs kernel 3.1.
+- **`patches/zt-1.16.2-make-linux-armv5te-softfloat.patch`:** `make-linux.mk` only picks soft-float flags when `dpkg`
+  reports `armel`; otherwise it forces hard-float armv6 (and may enable NEON). The patch always uses
+  `-march=armv5te -mtune=arm926ej-s -mfloat-abi=soft -msoft-float -mno-unaligned-access -marm` and sets
+  `ZT_USE_ARM32_NEON_ASM_CRYPTO=0`.
+- **`patches/zt-1.16.2-noarp-fix.patch`:** see below. 1.16.2 still has the same old-kernel ioctl path.
+- **`patches/zt-1.16.2-disable-recvmmsg.patch`:** musl headers define `MSG_WAITFORONE`, so without this,
+  `Phy.hpp` would compile `recvmmsg` (Linux 2.6.33+). On 2.6.24 that syscall returns `ENOSYS` and UDP
+  receive would fail. The patch adds `&& !defined(ZT_DISABLE_RECVMMSG)`; the build defines that macro.
+- **`patches/zt-1.16.2-httplib-so-reuseaddr.patch`:** cpp-httplib's default socket options use `SO_REUSEPORT`
+  when the libc headers define it, and in that case they skip `SO_REUSEADDR`. musl defines `SO_REUSEPORT`,
+  but Linux 2.6.24 does not implement it, so `setsockopt` fails and `bind()` of the HTTP control plane to
+  port 9993 fails if the port is in `TIME_WAIT` (`Error binding control plane... Exiting`). The patch always
+  sets `SO_REUSEADDR` (and still tries `SO_REUSEPORT`).
+- The 1.10.6 build script and patches remain in the repo (`scripts/build_zt_1.10.6.sh`,
+  `patches/zt-1.10.6-*.patch`). A prebuilt 1.10.6 binary is in the
+  [v1.2.0 release](https://github.com/fredrikspang-sys/mybook-world-zerotier/releases/tag/v1.2.0).
 
 ## The NOARP bug (and the fix)
 
@@ -192,15 +206,21 @@ The fix re-reads the flags right before setting `IFF_UP`:
 
 With an unpatched binary, the workaround is `ifconfig <zt-device> arp` after every start.
 
+The same fix is in `patches/zt-1.16.2-noarp-fix.patch` (the ioctl sequence is unchanged in 1.16.2
+on the old-kernel path).
+
 ## Known limitations
 
 - **No IPv6.** The stock kernel has no IPv6, so ZeroTier works over IPv4 only (on both the underlay and the virtual network).
-- **ZeroTier 1.10.6, without SSO/OIDC.** No Rust or OpenSSL, and no web UI; manage it with `zerotier-cli`.
-  Newer releases need Rust for the default build.
-- **About 5–6 MB RSS** for the daemon, against 128 MB RAM.
+- **ZeroTier 1.16.2, without SSO/OIDC.** No Rust or OpenSSL, and no web UI; manage it with `zerotier-cli`.
+  The official 1.16.2 default build needs Rust for SSO; this one is built with `ZT_SSO_SUPPORTED=0`.
+- **About 6.5 MB RSS** for the daemon (14 threads), against 128 MB RAM. A little more than 1.10.6
+  (~5–6 MB, 5 threads), still fine on this box.
 - **Throughput** is limited by the 200 MHz-class ARM9 CPU, which does all the crypto in software.
 - **Firmware specific.** `tun.ko` only fits firmware 01.02.14 / kernel `2.6.24.4 mod_unload ARMv5`.
-- **No automatic updates.** Rebuild with a newer tag at your own risk.
+- **No automatic updates.** Rebuild with a newer tag at your own risk. The previous 1.10.6 binary
+  remains available from the [v1.2.0 release](https://github.com/fredrikspang-sys/mybook-world-zerotier/releases/tag/v1.2.0)
+  as a fallback (keep a copy as `zerotier-one-1.10.6` if you want to switch back).
 
 ## See also
 
@@ -214,5 +234,6 @@ See [LICENSES.md](LICENSES.md). In short:
 
 - the scripts and docs in this repo are MIT;
 - `bin/tun.ko` is GPL-2.0 (Linux kernel);
-- `bin/zerotier-one` is ZeroTier One 1.10.6 under the ZeroTier BSL 1.1 terms in
-  `licenses/ZeroTier-LICENSE.txt`, plus bundled third-party code.
+- `bin/zerotier-one` is ZeroTier One 1.16.2 under the Mozilla Public License 2.0 in
+  `licenses/ZeroTier-LICENSE-MPL.txt`, plus bundled third-party code. The previous 1.10.6
+  binary (v1.2.0) was under BSL 1.1; that text is still in `licenses/ZeroTier-LICENSE.txt`.

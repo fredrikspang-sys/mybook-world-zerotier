@@ -1,0 +1,7 @@
+cpp-httplib (httplib.h)
+
+Copyright (c) 2024 Yuji Hirose. All rights reserved.
+MIT License
+
+(The upstream header is licensed under the MIT License. See
+https://github.com/yhirose/cpp-httplib for the full project.)
