@@ -10,7 +10,7 @@ is far too old for any official ZeroTier build. This repo provides:
 |------|------|
 | `bin/tun.ko` | Universal TUN/TAP driver built from WD's own GPL kernel source, vermagic `2.6.24.4 mod_unload ARMv5` |
 | `bin/zerotier-one` | ZeroTier One 1.10.6, fully static (musl), ARMv5TE soft-float EABI, with a NOARP fix for old kernels |
-| `scripts/init.d/zerotier` | Boot script (start/stop/restart/status/save/cli) for the WD firmware's `/etc/init.d/S??*` mechanism; keeps ZeroTier's state in RAM so the disks can spin down |
+| `scripts/init.d/zerotier` | Boot script (start/stop/restart/status/save/cli) for the WD firmware's `/etc/init.d/S??*` mechanism; binary and seed in `/usr/local/zerotier` (root fs), live state in RAM so the disks can spin down |
 | `scripts/install.sh` | Installer that runs on the NAS |
 | `scripts/build_tun.sh`, `scripts/build_zt.sh` | Rebuild both binaries from source on an x86_64 Linux host |
 | `patches/` | All source changes (kernel Makefile, ZeroTier makefile, NOARP fix) plus the exact kernel `.config` |
@@ -37,18 +37,20 @@ algorithms, e.g. `-oKexAlgorithms=+diffie-hellman-group1-sha1 -oHostKeyAlgorithm
 
 ```sh
 sha256sum -c bin/SHA256SUMS
-tar cf - bin scripts | ssh root@<NAS_IP> 'mkdir -p /DataVolume/zerotier-install && cd /DataVolume/zerotier-install && tar xf -'
-ssh root@<NAS_IP> 'cd /DataVolume/zerotier-install && sh scripts/install.sh'
+tar cf - bin scripts | ssh root@<NAS_IP> 'mkdir -p /tmp/zerotier-install && cd /tmp/zerotier-install && tar xf -'
+ssh root@<NAS_IP> 'cd /tmp/zerotier-install && sh scripts/install.sh'
 ```
 
 `install.sh`:
 
-- checks the kernel version, the CPU architecture, that `/DataVolume` is mounted, and the vermagic;
+- checks the kernel version, the CPU architecture, and the vermagic;
 - copies `tun.ko` to `/lib/modules/2.6.24.4/kernel/drivers/net/`;
-- copies `zerotier-one` to `/DataVolume/zerotier/`, with the `zerotier-cli` and `zerotier-idtool` symlinks;
+- copies `zerotier-one` to `/usr/local/zerotier/`, with the `zerotier-cli` and `zerotier-idtool` symlinks;
 - installs `/etc/init.d/zerotier` and links it as `/etc/init.d/S99zerotier`.
 
-It backs up any file it replaces (`*.bak-<timestamp>`), then starts the daemon.
+The binary and the persistent seed live under **`/usr/local/zerotier`** on the root filesystem (`/dev/md0`), not on `/DataVolume`. That way they survive a factory reset and a volume recreate, and `zerotier-one` is not executed from `/DataVolume` (a process running from that path holds the filesystem busy and blocks the WD web GUI's umount / "create volume" path). If a previous install still has a seed in `/DataVolume/zerotier/var` and the new seed is empty, `install.sh` copies it over and leaves the old copy in place.
+
+It backs up any file it replaces (`tun.ko.bak-<timestamp>` under the module directory, `zerotier-one.bak-<timestamp>` next to the binary, and `/etc/init.d/_zerotier.bak-<timestamp>` for the init script — leading underscore so the firmware does not treat the backup as a service), then starts the daemon.
 
 Then join your network and authorize the node in ZeroTier Central:
 
@@ -68,8 +70,8 @@ using (RAM or disk), so you don't need to know which one it is.
 insmod /lib/modules/2.6.24.4/kernel/drivers/net/tun.ko
 grep tun /proc/misc                         # -> "200 tun"
 [ -c /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }
-mkdir -p /DataVolume/zerotier/var
-/DataVolume/zerotier/zerotier-one -d /DataVolume/zerotier/var >/dev/null 2>&1 </dev/null
+mkdir -p /usr/local/zerotier/var
+/usr/local/zerotier/zerotier-one -d /usr/local/zerotier/var >/dev/null 2>&1 </dev/null
 ```
 
 Redirect the output when starting the daemon over SSH. Otherwise the session stays open,
@@ -84,8 +86,7 @@ The root filesystem (ext3 on `/dev/md0`) is persistent.
 `S99zerotier` therefore runs after the network (`S40network`) and the shares. The script:
 
 - loads `tun.ko` if needed and creates `/dev/net/tun` if it is missing;
-- waits up to 60 s for `/DataVolume` (in the background, so boot is not delayed);
-- starts the daemon.
+- starts the daemon from `/usr/local/zerotier` (it does not wait for `/DataVolume`).
 
 It logs to syslog with the tag `zerotier`. To disable it: `rm /etc/init.d/S99zerotier`.
 
@@ -95,26 +96,28 @@ The NAS spins its disks down only after 10 minutes without any disk I/O (the fir
 `/usr/bin/monitorio.sh` watches `/proc/diskstats` and then runs `hdparm -y`). ZeroTier
 rewrites `networks.d/<NETWORK_ID>.conf` in its home directory about **every 60 seconds**
 (each time it refreshes the network config from the controller), plus `peers.d/` now and then.
-With the home on `/DataVolume`, those small writes alone keep the disks spinning forever.
-`/`, `/var` and `/DataVolume` are all RAID partitions on the same disks, so there's no
-"other" disk to move them to.
+With the home on a disk filesystem (`/` or `/DataVolume`), those small writes alone keep
+the disks spinning forever. `/`, `/var` and `/DataVolume` are all RAID partitions on the
+same disks, so there's no "other" disk to move the live state to.
 
 The init script therefore runs the daemon with its home in **`/mnt/ram/zerotier`**. That's the
 firmware's own tmpfs (`/dev/ram0`, mounted by `S01auto_mountd`, which `rcS` runs long before `S99zerotier`).
 
-- **`/DataVolume/zerotier/var` is the persistent seed.** On every start, if the RAM home has no
+- **`/usr/local/zerotier/var` is the persistent seed.** On every start, if the RAM home has no
   identity yet (e.g. after a reboot), the script copies `identity.*`, `authtoken.secret`, `planet`,
   `networks.d/`, `moons.d/` and `peers.d/` from the seed into RAM. The node ID and the assigned
-  IPs therefore stay the same across reboots.
+  IPs therefore stay the same across reboots. The seed is on the root filesystem so it survives
+  a factory reset and a DataVolume recreate; only `save`/first-start write to it, not the 60 s
+  refresh.
 - **The identity never leaves the NAS.** It's only copied between the NAS's own disk and RAM.
   On the very first start (empty seed), the identity ZeroTier generates in RAM is saved to the seed
   right away. `save` never overwrites an identity that already exists in the seed. If the two
   differ, it only prints a warning.
 - **After joining (or leaving) a network, run `/etc/init.d/zerotier save`.** It copies `networks.d/*.conf`
   (and moons) from RAM back to the seed. `stop` and `restart` also save, but at shutdown the firmware
-  may unmount `/DataVolume` before `S99zerotier stop` runs, so don't rely on that. Leaving a network
+  may stop services in an order you shouldn't rely on. Leaving a network
   is never mirrored automatically, as a safety measure. After `cli leave <NETWORK_ID>`, delete
-  `/DataVolume/zerotier/var/networks.d/<NETWORK_ID>.conf` and `<NETWORK_ID>.local.conf` yourself.
+  `/usr/local/zerotier/var/networks.d/<NETWORK_ID>.conf` and `<NETWORK_ID>.local.conf` yourself.
 - **Fallback:** if `/mnt/ram` isn't mounted, the daemon runs directly from the disk home, as before.
   Set `ZT_RAM_HOME=` at the top of the script to `auto` (default), `yes` (RAM only; refuse to start
   without `/mnt/ram`) or `no` (always the disk home).

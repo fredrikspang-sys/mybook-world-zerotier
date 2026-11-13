@@ -2,12 +2,18 @@
 # /etc/init.d/zerotier - ZeroTier One for WD My Book World Edition II (fw 01.02.14)
 # Hooked into boot via /etc/init.d/S99zerotier -> zerotier (rcS runs "S??* start", rcH runs "S??* stop").
 #
+# Binary and persistent seed live in /usr/local/zerotier (root filesystem, /dev/md0).
+# That path survives a factory reset and a DataVolume recreate, and the daemon is
+# not executed from /DataVolume, so it does not hold that filesystem busy or block
+# the WD GUI umount / "create volume" path. (Older installs used /DataVolume/zerotier.)
+#
 # Where the state lives (ZT_RAM_HOME):
 #   ZeroTier rewrites networks.d/<nwid>.conf about every 60 s (on each network config
-#   refresh). With its home on the data disk, that write alone keeps the disks from ever
-#   spinning down. So by default ("auto") the live home is /mnt/ram/zerotier (tmpfs, mounted
-#   by S01auto_mountd before S99zerotier runs), seeded at every start from the persistent
-#   copy in $ZT_SEED on the data disk. If /mnt/ram is not mounted, the disk home is used.
+#   refresh). With its home on a disk filesystem, that write alone keeps the disks from
+#   ever spinning down. So by default ("auto") the live home is /mnt/ram/zerotier (tmpfs,
+#   mounted by S01auto_mountd before S99zerotier runs), seeded at every start from the
+#   persistent copy in $ZT_SEED on the root filesystem. If /mnt/ram is not mounted, the
+#   disk home is used.
 #     auto - RAM home if /mnt/ram is mounted, else the disk home (default)
 #     yes  - RAM home only; refuse to start without /mnt/ram
 #     no   - always use the disk home (the old behaviour)
@@ -16,14 +22,13 @@
 #   overwrites an identity that already exists in the seed.
 
 ZT_RAM_HOME=auto
-ZT_DIR=/DataVolume/zerotier
+ZT_DIR=/usr/local/zerotier
 ZT_BIN=$ZT_DIR/zerotier-one
 ZT_CLI=$ZT_DIR/zerotier-cli
 ZT_SEED=$ZT_DIR/var
 RAM_BASE=/mnt/ram
 RAM_HOME=$RAM_BASE/zerotier
 TUN_KO=/lib/modules/2.6.24.4/kernel/drivers/net/tun.ko
-WAIT_MAX=60
 
 log() { echo "zerotier: $*"; logger -t zerotier "$*" 2>/dev/null; }
 
@@ -64,15 +69,6 @@ prep_tun() {
 	return 0
 }
 
-wait_datavolume() {
-	i=0
-	while ! grep -q ' /DataVolume ' /proc/mounts; do
-		[ $i -ge $WAIT_MAX ] && return 1
-		sleep 1; i=`expr $i + 1`
-	done
-	return 0
-}
-
 # Seed the RAM home from the disk copy (only if the RAM home has no identity yet)
 prep_home() {
 	mkdir -p "$ZT_SEED" && chmod 700 "$ZT_SEED"
@@ -96,7 +92,6 @@ do_save() {
 	[ -n "$H" ] || { pick_home; H=$ZT_HOME; }
 	if [ "$H" = "$ZT_SEED" ]; then echo "zerotier: home is on disk ($H), nothing to save"; return 0; fi
 	[ -d "$H" ] || { log "save: $H does not exist"; return 1; }
-	grep -q ' /DataVolume ' /proc/mounts || { log "save: /DataVolume not mounted"; return 1; }
 	mkdir -p "$ZT_SEED/networks.d" && chmod 700 "$ZT_SEED" "$ZT_SEED/networks.d" || return 1
 	for f in identity.public identity.secret authtoken.secret; do
 		[ -f "$H/$f" ] || continue
@@ -114,7 +109,7 @@ do_save() {
 	done
 	if [ -d "$H/moons.d" ]; then
 		mkdir -p "$ZT_SEED/moons.d"
-		for f in "$H"/moons.d/*; do [ -f "$f" ] && cp -p "$f" "$ZT_SEED/moons.d/"; done
+		for f in "$H/moons.d/"*; do [ -f "$f" ] && cp -p "$f" "$ZT_SEED/moons.d/"; done
 	fi
 	# A network you left is not removed from the seed automatically (safety); delete
 	# $ZT_SEED/networks.d/<nwid>.conf and <nwid>.local.conf yourself.
@@ -126,7 +121,6 @@ do_save() {
 do_start() {
 	if is_running; then log "already running (pid $P, home $RUN_HOME)"; return 0; fi
 	prep_tun || return 1
-	if ! wait_datavolume; then log "/DataVolume not mounted after ${WAIT_MAX}s, not starting"; return 1; fi
 	if [ ! -x "$ZT_BIN" ]; then log "$ZT_BIN missing"; return 1; fi
 	pick_home
 	prep_home || return 1
@@ -157,13 +151,7 @@ do_stop() {
 
 case "$1" in
 	start)
-		if grep -q ' /DataVolume ' /proc/mounts; then
-			do_start
-		else
-			# Don't block boot: wait for /DataVolume in the background
-			log "/DataVolume not mounted yet, waiting in background (max ${WAIT_MAX}s)"
-			( do_start ) >/dev/null 2>&1 </dev/null &
-		fi
+		do_start
 		;;
 	stop)    do_stop ;;
 	restart) do_stop; do_start ;;

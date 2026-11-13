@@ -3,16 +3,23 @@
 # Run ON THE NAS as root (busybox sh), from a directory containing this repo's bin/ and scripts/:
 #   sh scripts/install.sh
 # It does NOT join any network; do that yourself afterwards.
+#
+# Binary and persistent seed go to /usr/local/zerotier (root filesystem) so they
+# survive a factory reset or a DataVolume recreate, and so zerotier-one is not
+# executed from /DataVolume (that would hold the volume busy and block the WD
+# GUI umount / "create volume" path). Older installs used /DataVolume/zerotier;
+# this script copies an existing seed from there if the new seed is empty, and
+# does not delete the old copy.
 set -e
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 KVER=2.6.24.4
 MODDIR=/lib/modules/$KVER/kernel/drivers/net
-ZT_DIR=/DataVolume/zerotier
+ZT_DIR=/usr/local/zerotier
+OLD_ZT_DIR=/DataVolume/zerotier
 STAMP=$(date +%Y%m%d%H%M%S)
 
 [ "$(uname -r)" = "$KVER" ] || { echo "kernel is $(uname -r), expected $KVER - aborting"; exit 1; }
 case "$(uname -m)" in armv5*) ;; *) echo "unexpected arch $(uname -m) - aborting"; exit 1;; esac
-grep -q ' /DataVolume ' /proc/mounts || { echo "/DataVolume is not mounted - aborting"; exit 1; }
 
 # Check vermagic of tun.ko and of an existing WD module before loading anything
 # (busybox 1.1.1 has no strings/tr/grep -o, so match the exact string)
@@ -28,14 +35,29 @@ cp "$HERE/bin/tun.ko" "$MODDIR/tun.ko"; chmod 644 "$MODDIR/tun.ko"
 
 echo "== zerotier-one -> $ZT_DIR"
 mkdir -p "$ZT_DIR/var"
+chmod 700 "$ZT_DIR" "$ZT_DIR/var"
 if [ -f /etc/init.d/zerotier ]; then /etc/init.d/zerotier stop || true; fi
 [ -f "$ZT_DIR/zerotier-one" ] && cp -p "$ZT_DIR/zerotier-one" "$ZT_DIR/zerotier-one.bak-$STAMP"
 cp "$HERE/bin/zerotier-one" "$ZT_DIR/zerotier-one"; chmod 755 "$ZT_DIR/zerotier-one"
 ln -sf zerotier-one "$ZT_DIR/zerotier-cli"
 ln -sf zerotier-one "$ZT_DIR/zerotier-idtool"
 
+# Keep node id and memberships if this is a move from /DataVolume/zerotier
+if [ -f "$OLD_ZT_DIR/var/identity.secret" ] && [ ! -f "$ZT_DIR/var/identity.secret" ]; then
+	echo "== migrating seed from $OLD_ZT_DIR/var -> $ZT_DIR/var (old copy left in place)"
+	for f in identity.public identity.secret authtoken.secret planet; do
+		[ -f "$OLD_ZT_DIR/var/$f" ] && cp -p "$OLD_ZT_DIR/var/$f" "$ZT_DIR/var/"
+	done
+	for d in networks.d moons.d peers.d; do
+		[ -d "$OLD_ZT_DIR/var/$d" ] && cp -pR "$OLD_ZT_DIR/var/$d" "$ZT_DIR/var/"
+	done
+	chmod 700 "$ZT_DIR/var" "$ZT_DIR/var/"*d 2>/dev/null || true
+	chmod 600 "$ZT_DIR/var/identity.public" "$ZT_DIR/var/identity.secret" "$ZT_DIR/var/authtoken.secret" "$ZT_DIR/var/planet" 2>/dev/null || true
+fi
+
 echo "== /etc/init.d/zerotier + S99zerotier"
-[ -f /etc/init.d/zerotier ] && cp -p /etc/init.d/zerotier "/etc/init.d/zerotier.bak-$STAMP"
+# Leading underscore: NAS convention so a firmware/rc scan does not treat the backup as a service.
+[ -f /etc/init.d/zerotier ] && cp -p /etc/init.d/zerotier "/etc/init.d/_zerotier.bak-$STAMP"
 cp "$HERE/scripts/init.d/zerotier" /etc/init.d/zerotier; chmod 755 /etc/init.d/zerotier
 ln -sf zerotier /etc/init.d/S99zerotier
 sync
